@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { PlaybackState, Prompt, Style } from './types';
-import { GoogleGenAI, LiveMusicFilteredPrompt } from '@google/genai';
+import type { AnalysisResponse, PlaybackState, Prompt, Style } from './types';
+import { GoogleGenAI, LiveMusicFilteredPrompt, Type } from '@google/genai';
 import { PromptDjMidi } from './components/PromptDjMidi';
 import { ToastMessage } from './components/ToastMessage';
 import { LiveMusicHelper } from './utils/LiveMusicHelper';
@@ -18,6 +18,148 @@ const model = 'lyria-realtime-exp';
 
 let keyToEnglish: Map<string, string>;
 let englishToKey: Map<string, string>;
+
+async function analyzeImage(
+  imageData: {data: string, mimeType: string}, 
+  styles: Style[]
+): Promise<AnalysisResponse> {
+  const imagePart = {
+    inlineData: {
+      mimeType: imageData.mimeType,
+      data: imageData.data,
+    },
+  };
+
+  // Flatten all prompts into a single list for the model
+  const allPrompts = styles.flatMap(style => style.prompts.map(p => keyToEnglish.get(p.text) || p.text));
+
+  const textPart = {
+    text: `Analyze the attached image to determine the most suitable musical mood for a soundtrack.
+
+From the provided list of musical descriptions, choose between 4 and 8 that best match the image's mood, content, and style.
+Assign a weight between 0.5 and 1.5 to each of your chosen prompts. Higher weights indicate a stronger match.
+
+Return your response ONLY in JSON format according to the provided schema.
+
+**CRITICAL INSTRUCTION:** The 'text' values for the prompts you return MUST EXACTLY match one of the descriptions from the provided list.
+
+Available musical descriptions:
+${JSON.stringify(allPrompts)}`
+  };
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: { parts: [imagePart, textPart] },
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          prompts: {
+            type: Type.ARRAY,
+            description: 'An array of 4 to 8 suggested prompts with weights.',
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                text: {
+                  type: Type.STRING,
+                  description: 'The text key of the prompt from the provided list.',
+                },
+                weight: {
+                  type: Type.NUMBER,
+                  description: 'A suggested weight between 0.5 and 1.5.',
+                },
+              },
+              required: ['text', 'weight'],
+            },
+          },
+        },
+        required: ['prompts'],
+      },
+    },
+  });
+
+  const jsonText = response.text.trim();
+  const parsedResponse = JSON.parse(jsonText);
+  
+  // Translate model response back to keys
+  parsedResponse.prompts.forEach((p: {text: string}) => {
+    p.text = englishToKey.get(p.text) || p.text;
+  });
+
+  return parsedResponse;
+}
+
+async function analyzeAudio(
+  audioData: {data: string, mimeType: string}, 
+  styles: Style[]
+): Promise<AnalysisResponse> {
+  const audioPart = {
+    inlineData: {
+      mimeType: audioData.mimeType,
+      data: audioData.data,
+    },
+  };
+
+  const allPrompts = styles.flatMap(style => style.prompts.map(p => keyToEnglish.get(p.text) || p.text));
+
+  const textPart = {
+    text: `Analyze the attached audio clip to determine its musical style, mood, and instrumentation.
+
+From the provided list of musical descriptions, choose between 4 and 8 that best describe the audio.
+Assign a weight between 0.5 and 1.5 to each of your chosen prompts. Higher weights indicate a stronger match.
+
+Return your response ONLY in JSON format according to the provided schema.
+
+**CRITICAL INSTRUCTION:** The 'text' values for the prompts you return MUST EXACTLY match one of the descriptions from the provided list.
+
+Available musical descriptions:
+${JSON.stringify(allPrompts)}`
+  };
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: { parts: [audioPart, textPart] },
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          prompts: {
+            type: Type.ARRAY,
+            description: 'An array of 4 to 8 suggested prompts with weights.',
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                text: {
+                  type: Type.STRING,
+                  description: 'The text key of the prompt from the provided list.',
+                },
+                weight: {
+                  type: Type.NUMBER,
+                  description: 'A suggested weight between 0.5 and 1.5.',
+                },
+              },
+              required: ['text', 'weight'],
+            },
+          },
+        },
+        required: ['prompts'],
+      },
+    },
+  });
+
+  const jsonText = response.text.trim();
+  const parsedResponse = JSON.parse(jsonText);
+  
+  // Translate model response back to keys
+  parsedResponse.prompts.forEach((p: {text: string}) => {
+    p.text = englishToKey.get(p.text) || p.text;
+  });
+
+  return parsedResponse;
+}
+
 
 async function main() {
   if ('serviceWorker' in navigator) {
@@ -40,6 +182,8 @@ async function main() {
   const initialPrompts = buildInitialPrompts(STYLES[0].prompts);
 
   const pdjMidi = new PromptDjMidi(initialPrompts, STYLES);
+  pdjMidi.analyzeImage = analyzeImage;
+  pdjMidi.analyzeAudio = analyzeAudio;
   document.body.appendChild(pdjMidi);
 
   const toastMessage = new ToastMessage();
@@ -101,6 +245,31 @@ async function main() {
     a.remove();
   });
 
+  pdjMidi.addEventListener('loop-download-requested', async () => {
+    pdjMidi.startLoopDownload();
+    try {
+        const blob = await liveMusicHelper.downloadLoop(20); // 20-second loop
+        if (blob) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = 'prompt-dj-loop.wav';
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            a.remove();
+        } else {
+            toastMessage.show(t('loopDownloadFailed'));
+        }
+    } catch (e) {
+        console.error(e);
+        toastMessage.show(t('loopDownloadFailed'));
+    } finally {
+        pdjMidi.finishLoopDownload();
+    }
+  });
+
   liveMusicHelper.addEventListener('filtered-prompt', ((e: Event) => {
     const customEvent = e as CustomEvent<LiveMusicFilteredPrompt>;
     const filteredPrompt = customEvent.detail;
@@ -125,6 +294,10 @@ async function main() {
     pdjMidi.audioLevel = level;
   }));
 
+  audioAnalyser.addEventListener('audio-data-updated', ((e: Event) => {
+    const customEvent = e as CustomEvent<Uint8Array>;
+    pdjMidi.frequencyData = customEvent.detail;
+  }));
 }
 
 function buildInitialPrompts(defaultPrompts: { color: string; text: string; }[]) {
@@ -381,6 +554,111 @@ const STYLES: Style[] = [
       { color: '#f1faee', text: 'prompt_classic_blue_note_feel' },
       { color: '#e63946', text: 'prompt_double_bass_solo' },
       { color: '#1d3557', text: 'prompt_warm_mellow_trombone' },
+    ],
+  },
+  {
+    name: 'style_reggae_dub',
+    prompts: [
+      { color: '#008000', text: 'prompt_deep_sub_bassline' },
+      { color: '#ffff00', text: 'prompt_one_drop_drum_beat' },
+      { color: '#ff0000', text: 'prompt_skanking_guitar_chops' },
+      { color: '#008000', text: 'prompt_reggae_organ_bubble' },
+      { color: '#ffff00', text: 'prompt_echoing_snare_hits' },
+      { color: '#ff0000', text: 'prompt_melodica_lead' },
+      { color: '#008000', text: 'prompt_heavy_reverb_and_delay' },
+      { color: '#ffff00', text: 'prompt_dub_sirens_and_sfx' },
+      { color: '#ff0000', text: 'prompt_roots_reggae_vibe' },
+      { color: '#008000', text: 'prompt_positive_uplifting_feel' },
+      { color: '#ffff00', text: 'prompt_steppers_rhythm' },
+      { color: '#ff0000', text: 'prompt_brass_section_stabs' },
+      { color: '#008000', text: 'prompt_rimshot_heavy_percussion' },
+      { color: '#ffff00', text: 'prompt_tape_echo_effects' },
+      { color: '#ff0000', text: 'prompt_irievibes' },
+      { color: '#008000', text: 'prompt_chilled_out_groove' },
+    ],
+  },
+  {
+    name: 'style_epic_fantasy',
+    prompts: [
+      { color: '#ffd700', text: 'prompt_heroic_horn_melody' },
+      { color: '#c0c0c0', text: 'prompt_sweeping_string_ensemble' },
+      { color: '#b0e0e6', text: 'prompt_elven_choir' },
+      { color: '#a52a2a', text: 'prompt_dwarven_war_drums' },
+      { color: '#dda0dd', text: 'prompt_mystical_harp_arpeggios' },
+      { color: '#228b22', text: 'prompt_enchanted_forest_ambience' },
+      { color: '#98fb98', text: 'prompt_celtic_flute_solo' },
+      { color: '#ff4500', text: 'prompt_grand_orchestral_crescendo' },
+      { color: '#8b4513', text: 'prompt_ancient_battle_hymn' },
+      { color: '#afeeee', text: 'prompt_magical_glockenspiel' },
+      { color: '#dc143c', text: 'prompt_dragon_s_roar_sfx' },
+      { color: '#4682b4', text: 'prompt_adventurous_theme' },
+      { color: '#e6e6fa', text: 'prompt_haunting_vocal_lines' },
+      { color: '#fafad2', text: 'prompt_majestic_triumphant_fanfare' },
+      { color: '#4b0082', text: 'prompt_ominous_low_brass' },
+      { color: '#daa520', text: 'prompt_quest_for_glory' },
+    ],
+  },
+  {
+    name: 'style_cyberpunk',
+    prompts: [
+      { color: '#ff00ff', text: 'prompt_distorted_synth_bass' },
+      { color: '#00ffff', text: 'prompt_glitching_drum_machine' },
+      { color: '#ffff00', text: 'prompt_neon_arpeggios' },
+      { color: '#4b0082', text: 'prompt_dystopian_city_ambience' },
+      { color: '#ff4500', text: 'prompt_aggressive_industrial_beat' },
+      { color: '#7fffd4', text: 'prompt_cybernetic_vocal_fx' },
+      { color: '#8a2be2', text: 'prompt_dark_atmospheric_pads' },
+      { color: '#00ff00', text: 'prompt_high_tech_sound_design' },
+      { color: '#ff1493', text: 'prompt_driving_electronic_sequence' },
+      { color: '#1e90ff', text: 'prompt_futuristic_megacity_soundtrack' },
+      { color: '#c71585', text: 'prompt_gritty_synth_leads' },
+      { color: '#ff0000', text: 'prompt_computer_malfunction_sfx' },
+      { color: '#00bfff', text: 'prompt_pulsating_bassline' },
+      { color: '#696969', text: 'prompt_rainy_noir_atmosphere' },
+      { color: '#f0e68c', text: 'prompt_corporate_espionage_mood' },
+      { color: '#adff2f', text: 'prompt_transhumanist_theme' },
+    ],
+  },
+  {
+    name: 'style_acoustic_folk',
+    prompts: [
+      { color: '#cd853f', text: 'prompt_fingerpicked_acoustic_guitar' },
+      { color: '#8fbc8f', text: 'prompt_gentle_harmonica' },
+      { color: '#f4a460', text: 'prompt_strummed_mandolin' },
+      { color: '#8b4513', text: 'prompt_warm_upright_bass' },
+      { color: '#deb887', text: 'prompt_soft_vocal_harmonies_instrumental' },
+      { color: '#556b2f', text: 'prompt_folk_fiddle_melody' },
+      { color: '#d2b48c', text: 'prompt_simple_heartfelt_tune' },
+      { color: '#daa520', text: 'prompt_banjo_roll' },
+      { color: '#a0522d', text: 'prompt_foot_stomping_percussion' },
+      { color: '#ff8c00', text: 'prompt_campfire_singalong_vibe' },
+      { color: '#bdb76b', text: 'prompt_tambourine_and_shaker' },
+      { color: '#bc8f8f', text: 'prompt_intimate_storytelling_mood' },
+      { color: '#778899', text: 'prompt_melancholic_acoustic_ballad' },
+      { color: '#2e8b57', text: 'prompt_rolling_hills_soundscape' },
+      { color: '#b8860b', text: 'prompt_cajon_drum' },
+      { color: '#rosybrown', text: 'prompt_nostalgic_and_wistful' },
+    ],
+  },
+  {
+    name: 'style_horror_ambience',
+    prompts: [
+      { color: '#8b0000', text: 'prompt_dissonant_strings' },
+      { color: '#ffdead', text: 'prompt_creepy_music_box' },
+      { color: '#2f4f4f', text: 'prompt_low_suspenseful_drone' },
+      { color: '#ff0000', text: 'prompt_sudden_jump_scare_sfx' },
+      { color: '#f5fffa', text: 'prompt_haunting_whispers' },
+      { color: '#696969', text: 'prompt_unsettling_atonal_piano' },
+      { color: '#00008b', text: 'prompt_eerie_soundscape' },
+      { color: '#b22222', text: 'prompt_distant_screams' },
+      { color: '#708090', text: 'prompt_building_tension' },
+      { color: '#add8e6', text: 'prompt_ghostly_choir' },
+      { color: '#a0522d', text: 'prompt_creaking_floorboards_sfx' },
+      { color: '#483d8b', text: 'prompt_psychological_thriller_score' },
+      { color: '#dc143c', text: 'prompt_heartbeat_rhythm' },
+      { color: '#556b2f', text: 'prompt_scratching_sounds' },
+      { color: '#800080', text: 'prompt_something_is_wrong_feel' },
+      { color: '#4682b4', text: 'prompt_supernatural_presence' },
     ],
   }
 ];

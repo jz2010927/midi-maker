@@ -49,7 +49,7 @@ export function t(key: string, replacements?: Record<string, string>): string {
 }
 
 // Initialize with the user's browser language or fallback to English.
-const supportedLangs = ['en', 'es', 'ja', 'de', 'fr', 'ru', 'zh-CN', 'zh-TW'];
+const supportedLangs = ['en', 'zh-CN'];
 let initialLang = 'en';
 const browserLang = navigator.language; // e.g., 'zh-CN', 'de-AT'
 

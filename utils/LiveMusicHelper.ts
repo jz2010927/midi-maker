@@ -207,4 +207,64 @@ export class LiveMusicHelper extends EventTarget {
     return createWavBlob(concatenatedBytes, this.numChannels, this.sampleRate);
   }
 
+  public async downloadLoop(durationSeconds = 20): Promise<Blob | null> {
+    if (this.activePrompts.length === 0) {
+        this.dispatchEvent(new CustomEvent('error', { detail: 'noActivePromptError' }));
+        return null;
+    }
+
+    const recordedChunks: Uint8Array[] = [];
+    let tempSession: LiveMusicSession | null = null;
+
+    try {
+        tempSession = await this.ai.live.music.connect({
+            model: this.model,
+            callbacks: {
+                onmessage: (e: LiveMusicServerMessage) => {
+                    if (e.serverContent?.audioChunks) {
+                        for (const chunk of e.serverContent.audioChunks) {
+                            if (chunk.data) {
+                                const rawBytes = decode(chunk.data);
+                                recordedChunks.push(rawBytes);
+                            }
+                        }
+                    }
+                },
+                onerror: (e) => {
+                    console.error("Loop generation error during playback", e);
+                },
+            },
+        });
+
+        await tempSession.setWeightedPrompts({ weightedPrompts: this.activePrompts });
+        tempSession.play();
+
+        await new Promise(resolve => setTimeout(resolve, durationSeconds * 1000));
+        
+    } catch (e) {
+        console.error("Failed to setup or run loop generation session", e);
+        throw e;
+    } finally {
+        if (tempSession) {
+            tempSession.stop();
+        }
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    if (recordedChunks.length === 0) {
+        console.warn("No audio chunks received for loop download.");
+        return null;
+    }
+
+    const totalLength = recordedChunks.reduce((acc, val) => acc + val.length, 0);
+    const concatenatedBytes = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of recordedChunks) {
+        concatenatedBytes.set(chunk, offset);
+        offset += chunk.length;
+    }
+    
+    return createWavBlob(concatenatedBytes, this.numChannels, this.sampleRate);
+  }
 }

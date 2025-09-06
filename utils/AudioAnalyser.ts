@@ -21,7 +21,16 @@ export class AudioAnalyser extends EventTarget {
   }
   loop() {
     this.rafId = requestAnimationFrame(this.loop);
-    const level = this.getCurrentLevel();
+    
+    // This gets the data
+    this.node.getByteFrequencyData(this.freqData);
+
+    // New event with full data for visualizer
+    this.dispatchEvent(new CustomEvent('audio-data-updated', { detail: this.freqData }));
+
+    // Old event for knob halos
+    const avg = this.freqData.reduce((a, b) => a + b, 0) / this.freqData.length;
+    const level = avg / 0xff;
     this.dispatchEvent(new CustomEvent('audio-level-changed', { detail: level }));
   }
   start = this.loop;

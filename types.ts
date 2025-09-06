@@ -22,3 +22,7 @@ export interface Style {
   name: string;
   prompts: { color: string; text: string; }[];
 }
+
+export interface AnalysisResponse {
+  prompts: { text: string; weight: number }[];
+}

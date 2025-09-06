@@ -3,14 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import { css, html, LitElement } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { customElement, property, query, state } from 'lit/decorators.js';
 import { styleMap } from 'lit/directives/style-map.js';
 
 import { throttle } from '../utils/throttle';
 
 import './PromptController';
 import './PlayPauseButton';
-import type { PlaybackState, Prompt, Style } from '../types';
+import './AudioVisualizer';
+import type { AudioVisualizer } from './AudioVisualizer';
+import type { AnalysisResponse, PlaybackState, Prompt, Style } from '../types';
 import { MidiDispatcher } from '../utils/MidiDispatcher';
 import { t, setLanguage } from '../utils/i18n';
 
@@ -58,6 +60,7 @@ export class PromptDjMidi extends LitElement {
       display: flex;
       gap: 5px;
       align-items: center;
+      flex-wrap: wrap;
     }
     button {
       font: inherit;
@@ -91,11 +94,36 @@ export class PromptDjMidi extends LitElement {
       -webkit-font-smoothing: antialiased;
       font-weight: 600;
     }
+    #image-controls, #audio-controls {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+    }
+    #image-preview {
+      width: 28px;
+      height: 28px;
+      border-radius: 4px;
+      object-fit: cover;
+      border: 1px solid #fff8;
+    }
+    #image-upload-input, #audio-upload-input {
+      display: none;
+    }
+    .clear-btn {
+      padding: 0;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      line-height: 1;
+      font-size: 14px;
+      font-weight: bold;
+    }
   `;
 
   private prompts: Map<string, Prompt>;
   private midiDispatcher: MidiDispatcher;
   private readonly styles: Style[];
+  private readonly allPromptsMap: Map<string, { color: string, text: string }>;
 
   @property({ type: Boolean }) private showMidi = false;
   @property({ type: String }) public playbackState: PlaybackState = 'stopped';
@@ -104,6 +132,18 @@ export class PromptDjMidi extends LitElement {
   @state() private midiInputIds: string[] = [];
   @state() private activeMidiInputId: string | null = null;
   @state() private activeStyleName = '';
+  @state() private isAnalyzing = false;
+  @state() private imagePreviewUrl: string | null = null;
+  @state() private isDownloadingLoop = false;
+  
+  @property({ type: Object }) public frequencyData: Uint8Array | null = null;
+  @query('audio-visualizer') private visualizer!: AudioVisualizer;
+
+  @property({ attribute: false }) 
+  analyzeImage!: (imageData: {data: string, mimeType: string}, styles: Style[]) => Promise<AnalysisResponse>;
+
+  @property({ attribute: false }) 
+  analyzeAudio!: (audioData: {data: string, mimeType: string}, styles: Style[]) => Promise<AnalysisResponse>;
 
   @property({ type: Object })
   private filteredPrompts = new Set<string>();
@@ -121,6 +161,13 @@ export class PromptDjMidi extends LitElement {
     if (this.styles.length > 0) {
       this.activeStyleName = this.styles[0].name;
     }
+
+    this.allPromptsMap = new Map();
+    styles.forEach(style => {
+        style.prompts.forEach(prompt => {
+            this.allPromptsMap.set(prompt.text, prompt);
+        });
+    });
   }
 
   override connectedCallback() {
@@ -133,6 +180,17 @@ export class PromptDjMidi extends LitElement {
     super.disconnectedCallback();
     this.midiDispatcher.removeEventListener('midi-devices-changed', this.refreshMidiDevices);
     window.removeEventListener('language-changed', this.rerender);
+  }
+
+  override updated(changedProperties: Map<string | number | symbol, unknown>) {
+    super.updated(changedProperties);
+    if (changedProperties.has('playbackState')) {
+      if (this.playbackState === 'playing') {
+        this.visualizer?.play();
+      } else {
+        this.visualizer?.stop();
+      }
+    }
   }
 
   private handlePromptChanged(e: CustomEvent<Prompt>) {
@@ -250,12 +308,16 @@ export class PromptDjMidi extends LitElement {
   private handleStyleChange(event: Event) {
     const selectElement = event.target as HTMLSelectElement;
     const styleName = selectElement.value;
+    
+    if (styleName === 'style_analysis_mix') return;
+
     const selectedStyle = this.styles.find(s => s.name === styleName);
 
     if (selectedStyle) {
       this.activeStyleName = selectedStyle.name;
       this.prompts = this.buildPromptsForStyle(selectedStyle);
       this.filteredPrompts.clear();
+      this.clearImage();
       this.requestUpdate();
       this.dispatchEvent(
         new CustomEvent('prompts-changed', { detail: this.prompts }),
@@ -270,6 +332,7 @@ export class PromptDjMidi extends LitElement {
 
   private randomizePrompts() {
     const newPrompts = new Map(this.prompts);
+    this.clearImage();
   
     // Reset all weights to 0
     newPrompts.forEach((prompt) => {
@@ -307,26 +370,188 @@ export class PromptDjMidi extends LitElement {
     this.filteredPrompts = new Set([...this.filteredPrompts, promptKey]);
   }
 
+  private triggerImageUpload() {
+    this.shadowRoot?.getElementById('image-upload-input')?.click();
+  }
+
+  private async handleImageSelected(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (!input.files || input.files.length === 0) {
+      return;
+    }
+    const file = input.files[0];
+    
+    if (this.imagePreviewUrl) {
+      URL.revokeObjectURL(this.imagePreviewUrl);
+    }
+    this.imagePreviewUrl = URL.createObjectURL(file);
+
+    this.isAnalyzing = true;
+    try {
+      const base64Data = await this.blobToBase64(file);
+      const analysisResult = await this.analyzeImage(
+        { data: base64Data, mimeType: file.type },
+        this.styles
+      );
+
+      this.updatePromptsFromAnalysis(analysisResult);
+
+    } catch (err) {
+      console.error(err);
+      this.dispatchEvent(new CustomEvent('error', { detail: 'analysisFailedError' }));
+    } finally {
+      this.isAnalyzing = false;
+      input.value = '';
+    }
+  }
+
+  private blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        resolve(result.split(',')[1]);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  private updatePromptsFromAnalysis(result: AnalysisResponse) {
+    if (!result.prompts || result.prompts.length === 0) {
+        console.warn('Analysis returned no prompts.');
+        this.dispatchEvent(new CustomEvent('error', { detail: 'analysisFailedError' }));
+        return;
+    }
+
+    const newPrompts = new Map<string, Prompt>();
+    const usedPromptKeys = new Set<string>();
+
+    // Add prompts from analysis result
+    result.prompts.slice(0, 16).forEach(p => {
+        const promptDef = this.allPromptsMap.get(p.text);
+        if (promptDef) {
+            const promptId = `prompt-${newPrompts.size}`;
+            newPrompts.set(promptId, {
+                promptId,
+                text: promptDef.text,
+                weight: p.weight,
+                cc: newPrompts.size,
+                color: promptDef.color,
+            });
+            usedPromptKeys.add(promptDef.text);
+        }
+    });
+
+    // Fill remaining slots if necessary
+    if (newPrompts.size < 16) {
+        for (const promptDef of this.allPromptsMap.values()) {
+            if (!usedPromptKeys.has(promptDef.text)) {
+                const promptId = `prompt-${newPrompts.size}`;
+                 newPrompts.set(promptId, {
+                    promptId,
+                    text: promptDef.text,
+                    weight: 0,
+                    cc: newPrompts.size,
+                    color: promptDef.color,
+                });
+                if (newPrompts.size >= 16) break;
+            }
+        }
+    }
+
+    this.activeStyleName = 'style_analysis_mix';
+    this.prompts = newPrompts;
+    this.filteredPrompts.clear();
+    this.requestUpdate();
+    this.dispatchEvent(new CustomEvent('prompts-changed', { detail: this.prompts }));
+  }
+
+  private clearImage() {
+    if (this.imagePreviewUrl) {
+      URL.revokeObjectURL(this.imagePreviewUrl);
+    }
+    this.imagePreviewUrl = null;
+  }
+
+  private triggerAudioUpload() {
+    this.shadowRoot?.getElementById('audio-upload-input')?.click();
+  }
+
+  private async handleAudioFileSelected(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (!input.files || input.files.length === 0) {
+      return;
+    }
+    const file = input.files[0];
+    
+    this.isAnalyzing = true;
+    try {
+      const base64Data = await this.blobToBase64(file);
+      const analysisResult = await this.analyzeAudio(
+        { data: base64Data, mimeType: file.type },
+        this.styles
+      );
+      this.updatePromptsFromAnalysis(analysisResult);
+    } catch (err) {
+      console.error(err);
+      this.dispatchEvent(new CustomEvent('error', { detail: 'audioAnalysisFailedError' }));
+    } finally {
+      this.isAnalyzing = false;
+      input.value = '';
+    }
+  }
+
+  private get hasActivePrompts(): boolean {
+    return [...this.prompts.values()].some(p => p.weight > 0);
+  }
+
+  private requestLoopDownload() {
+    if (this.isDownloadingLoop) return;
+    this.dispatchEvent(new CustomEvent('loop-download-requested'));
+  }
+
+  public startLoopDownload() {
+    this.isDownloadingLoop = true;
+  }
+
+  public finishLoopDownload() {
+    this.isDownloadingLoop = false;
+  }
+
   override render() {
     const bg = styleMap({
       backgroundImage: this.makeBackground(),
     });
-    return html`<div id="background" style=${bg}></div>
+    return html`
+      <audio-visualizer .frequencyData=${this.frequencyData}></audio-visualizer>
+      <div id="background" style=${bg}></div>
       <div id="buttons">
         <select @change=${this.handleLanguageChange} .value=${document.documentElement.lang || 'en'}>
           <option value="en">English</option>
-          <option value="es">Español</option>
-          <option value="ja">日本語</option>
-          <option value="de">Deutsch</option>
-          <option value="fr">Français</option>
-          <option value="ru">Русский</option>
           <option value="zh-CN">简体中文</option>
-          <option value="zh-TW">繁體中文</option>
         </select>
         <select @change=${this.handleStyleChange} .value=${this.activeStyleName}>
+          ${this.activeStyleName === 'style_analysis_mix' ? html`<option value="style_analysis_mix">${t('style_analysis_mix')}</option>`: ''}
           ${this.styles.map(style => html`<option value=${style.name}>${t(style.name)}</option>`)}
         </select>
         <button @click=${this.randomizePrompts}>${t('randomize')}</button>
+        <div id="audio-controls">
+          <input type="file" id="audio-upload-input" accept="audio/*" @change=${this.handleAudioFileSelected}>
+          <button @click=${this.triggerAudioUpload} ?disabled=${this.isAnalyzing}>
+            ${this.isAnalyzing ? t('analyzing') : t('analyzeAudio')}
+          </button>
+        </div>
+        <div id="image-controls">
+          <input type="file" id="image-upload-input" accept="image/*" @change=${this.handleImageSelected}>
+          <button @click=${this.triggerImageUpload} ?disabled=${this.isAnalyzing}>
+            ${this.isAnalyzing ? t('analyzing') : t('analyzeImage')}
+          </button>
+          ${this.imagePreviewUrl ? html`
+            <img id="image-preview" src=${this.imagePreviewUrl} alt="Image preview"/>
+            <button @click=${this.clearImage} class="clear-btn" title=${t('clearImage')}>✕</button>
+          ` : ''}
+        </div>
         <button
           @click=${this.toggleShowMidi}
           class=${this.showMidi ? 'active' : ''}
@@ -334,6 +559,9 @@ export class PromptDjMidi extends LitElement {
         >
         <button @click=${this.requestDownload} ?disabled=${!this.isDownloadable}>
           ${t('download')}
+        </button>
+        <button @click=${this.requestLoopDownload} ?disabled=${this.isDownloadingLoop || !this.hasActivePrompts}>
+          ${this.isDownloadingLoop ? t('downloadingLoop') : t('downloadLoop')}
         </button>
         <select
           @change=${this.handleMidiInputChange}
