@@ -400,6 +400,61 @@ export class PromptDjMidi extends LitElement {
     );
   }
 
+  private randomizeAllPrompts() {
+    this.clearImage();
+  
+    // Get all unique prompts from all styles
+    const allPromptsList = [...this.allPromptsMap.values()];
+  
+    // Shuffle the list
+    const shuffledPrompts = allPromptsList.sort(() => 0.5 - Math.random());
+  
+    // Pick 2 to 4 prompts to activate
+    const numToActivate = Math.floor(Math.random() * 3) + 2;
+    const promptsToActivate = shuffledPrompts.slice(0, numToActivate);
+  
+    // Take the rest needed to fill the grid (up to 16)
+    const promptsToDeactivate = shuffledPrompts.slice(numToActivate, 16);
+  
+    const newPrompts = new Map<string, Prompt>();
+    let i = 0;
+  
+    // Add activated prompts with random weights
+    for (const promptDef of promptsToActivate) {
+      const promptId = `prompt-${i}`;
+      newPrompts.set(promptId, {
+        promptId,
+        text: promptDef.text,
+        weight: 0.5 + Math.random(), // Random weight between 0.5 and 1.5
+        cc: i,
+        color: promptDef.color,
+      });
+      i++;
+    }
+  
+    // Add deactivated prompts with weight 0
+    for (const promptDef of promptsToDeactivate) {
+      const promptId = `prompt-${i}`;
+      newPrompts.set(promptId, {
+        promptId,
+        text: promptDef.text,
+        weight: 0,
+        cc: i,
+        color: promptDef.color,
+      });
+      i++;
+    }
+    
+    // Update state
+    this.prompts = newPrompts;
+    this.activeStyleName = 'style_analysis_mix';
+    this.filteredPrompts.clear();
+    this.requestUpdate();
+    this.dispatchEvent(
+      new CustomEvent('prompts-changed', { detail: this.prompts }),
+    );
+  }
+
   private playPause() {
     this.dispatchEvent(new CustomEvent('play-pause'));
   }
@@ -600,6 +655,7 @@ export class PromptDjMidi extends LitElement {
           ${this.styles.map(style => html`<option value=${style.name}>${t(style.name)}</option>`)}
         </select>
         <button @click=${this.randomizePrompts}>${t('randomize')}</button>
+        <button @click=${this.randomizeAllPrompts}>${t('randomizeAll')}</button>
         <div id="audio-controls">
           <input type="file" id="audio-upload-input" accept="audio/*" @change=${this.handleAudioFileSelected}>
           <button @click=${this.triggerAudioUpload} ?disabled=${this.isAnalyzing}>
