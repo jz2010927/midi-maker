@@ -160,6 +160,64 @@ ${JSON.stringify(allPrompts)}`
   return parsedResponse;
 }
 
+async function generatePromptsFromText(
+  userPrompt: string,
+  styles: Style[]
+): Promise<AnalysisResponse> {
+  const allPrompts = styles.flatMap(style => style.prompts.map(p => keyToEnglish.get(p.text) || p.text));
+  
+  const systemInstruction = `You are a music director. Based on the user's request, select 4 to 8 musical descriptions from the provided list that best fit the mood.
+Assign a weight between 0.5 and 1.5 to each.
+Return ONLY a JSON object matching the schema.
+**CRITICAL INSTRUCTION:** The 'text' values for the prompts you return MUST EXACTLY match one of the descriptions from the provided list.
+
+Available musical descriptions:
+${JSON.stringify(allPrompts)}`;
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: `User's request: "${userPrompt}"`,
+    config: {
+      systemInstruction,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          prompts: {
+            type: Type.ARRAY,
+            description: 'An array of 4 to 8 suggested prompts with weights.',
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                text: {
+                  type: Type.STRING,
+                  description: 'The text key of the prompt from the provided list.',
+                },
+                weight: {
+                  type: Type.NUMBER,
+                  description: 'A suggested weight between 0.5 and 1.5.',
+                },
+              },
+              required: ['text', 'weight'],
+            },
+          },
+        },
+        required: ['prompts'],
+      },
+    },
+  });
+
+  const jsonText = response.text.trim();
+  const parsedResponse = JSON.parse(jsonText);
+  
+  // Translate model response back to keys
+  parsedResponse.prompts.forEach((p: {text: string}) => {
+    p.text = englishToKey.get(p.text) || p.text;
+  });
+
+  return parsedResponse;
+}
+
 
 async function main() {
   if ('serviceWorker' in navigator) {
@@ -184,6 +242,7 @@ async function main() {
   const pdjMidi = new PromptDjMidi(initialPrompts, STYLES);
   pdjMidi.analyzeImage = analyzeImage;
   pdjMidi.analyzeAudio = analyzeAudio;
+  pdjMidi.generatePromptsFromText = generatePromptsFromText;
   document.body.appendChild(pdjMidi);
 
   const toastMessage = new ToastMessage();

@@ -24,10 +24,11 @@ export class PromptDjMidi extends LitElement {
       height: 100%;
       display: flex;
       flex-direction: column;
-      justify-content: center;
+      justify-content: flex-start;
       align-items: center;
       box-sizing: border-box;
       position: relative;
+      padding-top: 8vmin;
     }
     #background {
       will-change: background-image;
@@ -43,14 +44,18 @@ export class PromptDjMidi extends LitElement {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       gap: 2.5vmin;
-      margin-top: 8vmin;
+      position: relative;
     }
     prompt-controller {
       width: 100%;
     }
     play-pause-button {
-      position: relative;
+      position: absolute;
       width: 15vmin;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 10;
     }
     #buttons {
       position: absolute;
@@ -118,6 +123,38 @@ export class PromptDjMidi extends LitElement {
       font-size: 14px;
       font-weight: bold;
     }
+    #footer-controls {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      margin-top: auto;
+      padding-bottom: 2vmin;
+      width: 100%;
+    }
+    #chat-container {
+      display: flex;
+      gap: 10px;
+      width: 80%;
+      max-width: 600px;
+      padding: 10px;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+    }
+    #chat-input {
+      flex-grow: 1;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 5px;
+      color: white;
+      padding: 8px 12px;
+      font-size: 1.8vmin;
+      outline: none;
+    }
+    #chat-input::placeholder {
+      color: rgba(255, 255, 255, 0.5);
+    }
   `;
 
   private prompts: Map<string, Prompt>;
@@ -135,6 +172,8 @@ export class PromptDjMidi extends LitElement {
   @state() private isAnalyzing = false;
   @state() private imagePreviewUrl: string | null = null;
   @state() private isDownloadingLoop = false;
+  @state() private chatPrompt = '';
+  @state() private isProcessingChat = false;
   
   @property({ type: Object }) public frequencyData: Uint8Array | null = null;
   @query('audio-visualizer') private visualizer!: AudioVisualizer;
@@ -144,6 +183,9 @@ export class PromptDjMidi extends LitElement {
 
   @property({ attribute: false }) 
   analyzeAudio!: (audioData: {data: string, mimeType: string}, styles: Style[]) => Promise<AnalysisResponse>;
+
+  @property({ attribute: false })
+  generatePromptsFromText!: (userPrompt: string, styles: Style[]) => Promise<AnalysisResponse>;
 
   @property({ type: Object })
   private filteredPrompts = new Set<string>();
@@ -519,6 +561,28 @@ export class PromptDjMidi extends LitElement {
     this.isDownloadingLoop = false;
   }
 
+  private handleChatKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      this.handleChatSubmit();
+    }
+  }
+
+  private async handleChatSubmit() {
+    if (this.isProcessingChat || !this.chatPrompt.trim()) return;
+
+    this.isProcessingChat = true;
+    try {
+      const analysisResult = await this.generatePromptsFromText(this.chatPrompt, this.styles);
+      this.updatePromptsFromAnalysis(analysisResult);
+      this.chatPrompt = '';
+    } catch (err) {
+      console.error(err);
+      this.dispatchEvent(new CustomEvent('error', { detail: 'chatRequestFailedError' }));
+    } finally {
+      this.isProcessingChat = false;
+    }
+  }
+
   override render() {
     const bg = styleMap({
       backgroundImage: this.makeBackground(),
@@ -577,8 +641,31 @@ export class PromptDjMidi extends LitElement {
         : html`<option value="">${t('noMidiDevices')}</option>`}
         </select>
       </div>
-      <div id="grid">${this.renderPrompts()}</div>
-      <play-pause-button .playbackState=${this.playbackState} @click=${this.playPause}></play-pause-button>`;
+      <div id="grid">
+        ${this.renderPrompts()}
+        <play-pause-button .playbackState=${this.playbackState} @click=${this.playPause}></play-pause-button>
+      </div>
+      <div id="footer-controls">
+        <div id="chat-container">
+          <input
+            id="chat-input"
+            type="text"
+            placeholder=${t('chatPlaceholder')}
+            .value=${this.chatPrompt}
+            @input=${(e: Event) => this.chatPrompt = (e.target as HTMLInputElement).value}
+            @keydown=${this.handleChatKeyDown}
+            ?disabled=${this.isProcessingChat}
+          />
+          <button
+            id="chat-submit"
+            @click=${this.handleChatSubmit}
+            ?disabled=${this.isProcessingChat || !this.chatPrompt.trim()}
+          >
+            ${this.isProcessingChat ? t('chatSubmitLoading') : t('chatSubmit')}
+          </button>
+        </div>
+      </div>
+      `;
   }
 
   private renderPrompts() {
